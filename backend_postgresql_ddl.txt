@@ -1,0 +1,39 @@
+- 1. EXTENSIONS (Good practice in Neon for generating UUIDs automatically)
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- 2. ENUM FOR FLEET TYPES (Restricts input to your exact vehicle types)
+CREATE TYPE fleet_vehicle_type AS ENUM ('snow cleaner', 'lawn mower', 'sweeper');
+
+-- 3. USERS TABLE
+CREATE TABLE users (
+    user_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    full_name VARCHAR(100) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL, -- Never store plain text passwords
+    role VARCHAR(50) DEFAULT 'operator',
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- INDEX FOR LOGIN SPEED
+CREATE INDEX idx_users_email ON users(email);
+
+-- 4. FLEETS TABLE
+CREATE TABLE fleets (
+    fleet_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    vehicle_type fleet_vehicle_type NOT NULL,
+    battery_life_percentage INT NOT NULL CHECK (battery_life_percentage BETWEEN 0 AND 100),
+    distance_covered_km NUMERIC(10, 2) DEFAULT 0.00 CHECK (distance_covered_km >= 0),
+    current_status VARCHAR(50) DEFAULT 'idle', -- e.g., active, charging, maintenance
+    last_ping_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5. USER FLEET MAPPING TABLE (Many-to-Many Bridge Table)
+CREATE TABLE user_fleets (
+    user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+    fleet_id UUID REFERENCES fleets(fleet_id) ON DELETE CASCADE,
+    assigned_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, fleet_id) -- Prevents assigning the same fleet to the same user twice
+);
