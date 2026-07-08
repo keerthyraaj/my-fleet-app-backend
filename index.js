@@ -7,6 +7,7 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
+app.set('trust proxy', 1);
 
 const configuredOrigins = (process.env.CORS_ORIGIN || '')
   .split(',')
@@ -44,6 +45,16 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+app.options('*', cors({
+  origin: (origin, callback) => {
+    if (isAllowedOrigin(origin)) {
+      return callback(null, origin || true);
+    }
+
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true
+}));
 app.use(express.json());
 app.use(session({
   secret: process.env.SESSION_SECRET || 'fleet-session-secret',
@@ -51,8 +62,8 @@ app.use(session({
   saveUninitialized: false,
   cookie: {
     httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production'
+    sameSite: 'none',
+    secure: true
   }
 }));
 
