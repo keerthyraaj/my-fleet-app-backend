@@ -1,5 +1,6 @@
 // backend/index.js
 const express = require('express');
+const session = require('express-session');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const cors = require('cors');
@@ -28,12 +29,30 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'fleet-session-secret',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production'
+  }
+}));
 
 // Connect to Neon PostgreSQL using your connection string
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
+
+const requireAuth = (req, res, next) => {
+  if (!req.session?.user) {
+    return res.status(401).json({ message: 'Not authenticated' });
+  }
+
+  next();
+};
 
 // LOGIN ENDPOINT
 app.post('/api/login', async (req, res) => {
@@ -71,6 +90,12 @@ app.post('/api/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
+    req.session.user = {
+      userId: user.user_id,
+      fullName: user.full_name,
+      email: user.email
+    };
+
     res.json({
       message: 'Login successful',
       fullName: user.full_name,
@@ -83,24 +108,9 @@ app.post('/api/login', async (req, res) => {
 });
 
 // DASHBOARD STATISTICS ENDPOINT
-app.get('/api/dashboard/stats', async (req, res) => {
-  const email = req.query.email;
-
-  if (!email) {
-    return res.status(400).json({ message: 'Email is required.' });
-  }
-
+app.get('/api/dashboard/stats', requireAuth, async (req, res) => {
   try {
-    const userResult = await pool.query(
-      'SELECT user_id, full_name FROM users WHERE email = $1',
-      [email]
-    );
-
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({ message: 'User not found.' });
-    }
-
-    const user = userResult.rows[0];
+    const user = req.session.user;
 
     const statsQuery = `
       SELECT
@@ -116,7 +126,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
       WHERE uf.user_id = $1
     `;
 
-    const statsResult = await pool.query(statsQuery, [user.user_id]);
+    const statsResult = await pool.query(statsQuery, [user.userId]);
 
     const typeQuery = `
       SELECT f.vehicle_type AS type, COUNT(*) AS count
@@ -127,12 +137,12 @@ app.get('/api/dashboard/stats', async (req, res) => {
       ORDER BY count DESC
     `;
 
-    const typeResult = await pool.query(typeQuery, [user.user_id]);
+    const typeResult = await pool.query(typeQuery, [user.userId]);
 
     const stats = statsResult.rows[0];
 
     res.json({
-      fullName: user.full_name,
+      fullName: user.fullName,
       stats: {
         fleetCount: Number(stats.fleet_count || 0),
         totalDistanceKm: Number(stats.total_distance_km || 0),
@@ -150,6 +160,75 @@ app.get('/api/dashboard/stats', async (req, res) => {
   } catch (error) {
     console.error('Dashboard error:', error);
     res.status(500).json({ message: 'Internal server error' });
+  }
+});
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({ user: req.session.user });
+});
+
+app.post('/api/logout', (req, res) => {
+  req.session.destroy((error) => {
+    if (error) {
+      return res.status(500).json({ message: 'Failed to logout' });
+    }
+
+    res.clearCookie('connect.sid');
+    return res.json({ message: 'Logged out successfully' });
+  });
+});
+
+//Fleets position endpoint
+app.get('/api/fleets', requireAuth, async (req, res) => {
+  try {
+    const user = req.session.user;
+
+    const query = `
+      SELECT
+        f.fleet_id,
+        f.vehicle_type,
+        f.battery_life_percentage,
+        f.distance_covered_km,
+        f.current_status,
+        f.last_ping_at,
+        fp.lat,
+        fp.long,
+        fp.current_ts
+
+      FROM users u
+
+      JOIN user_fleets uf
+        ON uf.user_id = u.user_id
+
+      JOIN fleets f
+        ON f.fleet_id = uf.fleet_id
+
+      LEFT JOIN LATERAL (
+        SELECT
+          lat,
+          long,
+          current_ts
+        FROM fleet_position
+        WHERE fleet_id = f.fleet_id
+        ORDER BY current_ts DESC
+        LIMIT 1
+      ) fp ON TRUE
+
+      WHERE u.user_id = $1
+
+      ORDER BY f.vehicle_type;
+    `;
+
+    const result = await pool.query(query, [user.userId]);
+
+    return res.status(200).json({
+      fleets: result.rows,
+    });
+  } catch (error) {
+    console.error("Fleet map error:", error);
+
+    return res.status(500).json({
+      error: "Failed to fetch fleet positions",
+    });
   }
 });
 
