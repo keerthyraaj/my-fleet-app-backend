@@ -189,6 +189,44 @@ app.get('/api/dashboard/stats', requireAuth, async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+app.get('/api/fleet_schedule_demo/:fleetId', requireAuth, async (req, res) => {
+  try {
+    const { fleetId } = req.params;
+    const userId = req.session.user.userId;
+
+    const query = `
+      SELECT
+        fs.schedule_id,
+        fs.fleet_id,
+        fs.start_lat,
+        fs.start_long,
+        fs.end_lat,
+        fs.end_long,
+        fs.start_time,
+        fs.end_time,
+        fs.speed_kmh
+      FROM fleet_schedules fs
+      JOIN user_fleets uf
+        ON uf.fleet_id = fs.fleet_id
+      WHERE uf.user_id = $1
+        AND fs.fleet_id = $2
+      ORDER BY fs.start_time DESC
+      LIMIT 1
+    `;
+
+    const result = await pool.query(query, [userId, fleetId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'No schedule found for this fleet.' });
+    }
+
+    return res.status(200).json({ schedule: result.rows[0] });
+  } catch (error) {
+    console.error('Fleet schedule demo error:', error);
+    return res.status(500).json({ message: 'Failed to load schedule demo data.' });
+  }
+});
+
 app.get('/api/auth/me', requireAuth, (req, res) => {
   res.json({ user: req.session.user });
 });
