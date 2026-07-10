@@ -81,6 +81,14 @@ const requireAuth = (req, res, next) => {
   next();
 };
 
+// ADD THIS ADMIN SECURITY MIDDLEWARE
+const requireAdmin = (req, res, next) => {
+  if (!req.session?.user || req.session.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Forbidden: Admin access required' });
+  }
+  next();
+};
+
 // LOGIN ENDPOINT
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
@@ -120,13 +128,15 @@ app.post('/api/login', async (req, res) => {
     req.session.user = {
       userId: user.user_id,
       fullName: user.full_name,
-      email: user.email
+      email: user.email,
+      role: user.role
     };
 
     res.json({
       message: 'Login successful',
       fullName: user.full_name,
-      email: user.email
+      email: user.email,
+      role: user.role
     });
   } catch (error) {
     console.error('Database error:', error);
@@ -299,3 +309,102 @@ app.get('/api/fleets', requireAuth, async (req, res) => {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+
+// ==========================================
+// ADMIN USER MANAGEMENT ENDPOINTS (CRUD)
+// ==========================================
+
+// 1. READ: Get all users (Managers & Operators)
+app.get('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT user_id, full_name, email, role, is_active FROM users ORDER BY created_at DESC');
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch users' });
+  }
+});
+
+// 2. CREATE: Add new manager/operator
+app.post('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
+  const { full_name, email, password, role } = req.body;
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const result = await pool.query(
+      'INSERT INTO users (full_name, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING user_id, full_name, email, role',
+      [full_name, email, hashedPassword, role]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to create user. Email may already exist.' });
+  }
+});
+
+// 3. UPDATE: Modify user roles or names
+app.put('/api/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
+  const { full_name, email, role, is_active } = req.body;
+  try {
+    await pool.query(
+      'UPDATE users SET full_name = $1, email = $2, role = $3, is_active = $4, updated_at = CURRENT_TIMESTAMP WHERE user_id = $5',
+      [full_name, email, role, is_active, req.params.id]
+    );
+    res.json({ message: 'User updated successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to update user' });
+  }
+});
+
+// 4. DELETE: Filter out self-deletion to prevent locked out administrators
+app.delete('/api/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    if (req.params.id === req.session.user.userId) {
+      return res.status(400).json({ message: 'Security action denied: You cannot delete your own active admin profile.' });
+    }
+    await pool.query('DELETE FROM users WHERE user_id = $1', [req.params.id]);
+    res.json({ message: 'User deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to delete user' });
+  }
+});
+
+// ==========================================
+// ADMIN FLEET MANAGEMENT ENDPOINTS (CRUD)
+// ==========================================
+
+// 1. CREATE: Deploy a new vehicle asset
+app.post('/api/admin/fleets', requireAuth, requireAdmin, async (req, res) => {
+  const { vehicle_type, battery_life_percentage, current_status } = req.body;
+  try {
+    const result = await pool.query(
+      'INSERT INTO fleets (vehicle_type, battery_life_percentage, current_status) VALUES ($1, $2, $3) RETURNING *',
+      [vehicle_type, battery_life_percentage, current_status || 'idle']
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to add fleet asset' });
+  }
+});
+
+// 2. UPDATE: Edit full fleet configuration values
+app.put('/api/admin/fleets/:id', requireAuth, requireAdmin, async (req, res) => {
+  const { vehicle_type, battery_life_percentage, distance_covered_km, current_status } = req.body;
+  try {
+    await pool.query(
+      'UPDATE fleets SET vehicle_type = $1, battery_life_percentage = $2, distance_covered_km = $3, current_status = $4 WHERE fleet_id = $5',
+      [vehicle_type, battery_life_percentage, distance_covered_km, current_status, req.params.id]
+    );
+    res.json({ message: 'Fleet updated successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to update fleet asset' });
+  }
+});
+
+// 3. DELETE: Decommission a fleet asset
+app.delete('/api/admin/fleets/:id', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM fleets WHERE fleet_id = $1', [req.params.id]);
+    res.json({ message: 'Fleet asset removed successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to delete fleet asset' });
+  }
+});
