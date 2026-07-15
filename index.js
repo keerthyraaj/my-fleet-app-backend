@@ -58,12 +58,21 @@ app.options('*', cors({
 app.use(express.json());
 app.use(session({
   secret: process.env.SESSION_SECRET || 'fleet-session-secret',
+
   resave: false,
+
   saveUninitialized: false,
+
+  proxy: true,
+
   cookie: {
     httpOnly: true,
+
     sameSite: 'none',
-    secure: true
+
+    secure: process.env.NODE_ENV === 'production',
+
+    maxAge: 1000 * 60 * 60 * 24 // 24 Hours
   }
 }));
 
@@ -143,6 +152,26 @@ app.post('/api/login', async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
+// ======================================================
+// RESTORE USER SESSION AFTER PAGE REFRESH
+// ======================================================
+app.get('/api/auth/me', (req, res) => {
+
+    if (!req.session || !req.session.user) {
+        return res.status(401).json({
+            message: "Not authenticated"
+        });
+    }
+
+    return res.json({
+        fullName: req.session.user.fullName,
+        email: req.session.user.email,
+        role: req.session.user.role
+    });
+
+});
+
 
 // DASHBOARD STATISTICS ENDPOINT
 app.get('/api/dashboard/stats', requireAuth, async (req, res) => {
