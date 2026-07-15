@@ -228,6 +228,212 @@ app.get('/api/dashboard/stats', requireAuth, async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
+app.get('/api/dashboard/insights', requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.user.userId;
+
+    const utilizationQuery = `
+      WITH day_series AS (
+        SELECT generate_series(
+          (CURRENT_DATE - INTERVAL '6 days')::date,
+          CURRENT_DATE::date,
+          INTERVAL '1 day'
+        )::date AS day
+      )
+      SELECT
+        ds.day,
+        COALESCE(
+          SUM(
+            EXTRACT(
+              EPOCH FROM (
+                LEAST(fs.end_time, ds.day + INTERVAL '1 day')
+                - GREATEST(fs.start_time, ds.day)
+              )
+            ) / 3600.0
+          ) FILTER (
+            WHERE fs.schedule_id IS NOT NULL
+              AND fs.end_time > ds.day
+              AND fs.start_time < ds.day + INTERVAL '1 day'
+          ),
+          0
+        ) AS active_hours
+      FROM day_series ds
+      LEFT JOIN user_fleets uf
+        ON uf.user_id = $1
+      LEFT JOIN fleet_schedules fs
+        ON fs.fleet_id = uf.fleet_id
+      GROUP BY ds.day
+      ORDER BY ds.day;
+    `;
+
+    const batteryDistributionQuery = `
+      SELECT
+        COUNT(*) FILTER (WHERE f.battery_life_percentage < 20) AS below_20,
+        COUNT(*) FILTER (WHERE f.battery_life_percentage >= 20 AND f.battery_life_percentage < 50) AS between_20_50,
+        COUNT(*) FILTER (WHERE f.battery_life_percentage >= 50 AND f.battery_life_percentage < 80) AS between_50_80,
+        COUNT(*) FILTER (WHERE f.battery_life_percentage >= 80) AS above_80
+      FROM user_fleets uf
+      JOIN fleets f ON f.fleet_id = uf.fleet_id
+      WHERE uf.user_id = $1;
+    `;
+
+    const activeLocationsQuery = `
+      SELECT
+        f.fleet_id,
+        f.vehicle_type,
+        f.current_status,
+        f.battery_life_percentage,
+        fp.lat,
+        fp.long,
+        fp.current_ts
+      FROM user_fleets uf
+      JOIN fleets f
+        ON f.fleet_id = uf.fleet_id
+      LEFT JOIN LATERAL (
+        SELECT lat, long, current_ts
+        FROM fleet_position
+        WHERE fleet_id = f.fleet_id
+        ORDER BY current_ts DESC
+        LIMIT 1
+      ) fp ON TRUE
+      WHERE uf.user_id = $1
+        AND f.current_status = 'active'
+        AND fp.lat IS NOT NULL
+        AND fp.long IS NOT NULL
+      ORDER BY fp.current_ts DESC NULLS LAST;
+    `;
+
+    const recentSchedulesQuery = `
+      SELECT
+        fs.schedule_id,
+        fs.fleet_id,
+        f.vehicle_type,
+        f.current_status,
+        fs.start_time,
+        fs.end_time,
+        fs.speed_kmh,
+        ROUND(
+          (
+            6371 * 2 * ASIN(
+              SQRT(
+                POWER(SIN(RADIANS((fs.end_lat - fs.start_lat) / 2)), 2)
+                + COS(RADIANS(fs.start_lat)) * COS(RADIANS(fs.end_lat))
+                * POWER(SIN(RADIANS((fs.end_long - fs.start_long) / 2)), 2)
+              )
+            )
+          )::numeric,
+          2
+        ) AS route_distance_km
+      FROM fleet_schedules fs
+      JOIN user_fleets uf
+        ON uf.fleet_id = fs.fleet_id
+      JOIN fleets f
+        ON f.fleet_id = fs.fleet_id
+      WHERE uf.user_id = $1
+      ORDER BY fs.end_time DESC NULLS LAST
+      LIMIT 10;
+    `;
+
+    const performanceQuery = `
+      SELECT
+        f.fleet_id,
+        f.vehicle_type,
+        f.distance_covered_km
+      FROM user_fleets uf
+      JOIN fleets f
+        ON f.fleet_id = uf.fleet_id
+      WHERE uf.user_id = $1
+      ORDER BY f.distance_covered_km DESC NULLS LAST;
+    `;
+
+    const lowBatteryQuery = `
+      SELECT
+        f.fleet_id,
+        f.vehicle_type,
+        f.battery_life_percentage,
+        f.current_status,
+        f.last_ping_at
+      FROM user_fleets uf
+      JOIN fleets f
+        ON f.fleet_id = uf.fleet_id
+      WHERE uf.user_id = $1
+        AND f.battery_life_percentage < 20
+      ORDER BY f.battery_life_percentage ASC, f.last_ping_at DESC NULLS LAST;
+    `;
+
+    const fleetRowsQuery = `
+      SELECT
+        f.fleet_id,
+        f.vehicle_type,
+        f.current_status,
+        f.battery_life_percentage,
+        f.distance_covered_km,
+        f.last_ping_at,
+        fp.current_ts AS last_position_at
+      FROM user_fleets uf
+      JOIN fleets f
+        ON f.fleet_id = uf.fleet_id
+      LEFT JOIN LATERAL (
+        SELECT current_ts
+        FROM fleet_position
+        WHERE fleet_id = f.fleet_id
+        ORDER BY current_ts DESC
+        LIMIT 1
+      ) fp ON TRUE
+      WHERE uf.user_id = $1
+      ORDER BY f.last_ping_at DESC NULLS LAST;
+    `;
+
+    const [
+      utilizationResult,
+      batteryResult,
+      activeLocationsResult,
+      recentSchedulesResult,
+      performanceResult,
+      lowBatteryResult,
+      fleetRowsResult
+    ] = await Promise.all([
+      pool.query(utilizationQuery, [userId]),
+      pool.query(batteryDistributionQuery, [userId]),
+      pool.query(activeLocationsQuery, [userId]),
+      pool.query(recentSchedulesQuery, [userId]),
+      pool.query(performanceQuery, [userId]),
+      pool.query(lowBatteryQuery, [userId]),
+      pool.query(fleetRowsQuery, [userId])
+    ]);
+
+    const batteryDistribution = batteryResult.rows[0] || {};
+
+    return res.json({
+      utilizationTrend: utilizationResult.rows.map((row) => ({
+        day: row.day,
+        activeHours: Number(row.active_hours || 0)
+      })),
+      batteryDistribution: [
+        { label: '<20%', count: Number(batteryDistribution.below_20 || 0) },
+        { label: '20-50%', count: Number(batteryDistribution.between_20_50 || 0) },
+        { label: '50-80%', count: Number(batteryDistribution.between_50_80 || 0) },
+        { label: '>80%', count: Number(batteryDistribution.above_80 || 0) }
+      ],
+      activeFleetLocations: activeLocationsResult.rows,
+      recentSchedules: recentSchedulesResult.rows,
+      performanceScores: performanceResult.rows.map((row) => ({
+        ...row,
+        distance_covered_km: Number(row.distance_covered_km || 0)
+      })),
+      lowBatteryAlerts: lowBatteryResult.rows,
+      fleetRows: fleetRowsResult.rows.map((row) => ({
+        ...row,
+        distance_covered_km: Number(row.distance_covered_km || 0)
+      }))
+    });
+  } catch (error) {
+    console.error('Dashboard insights error:', error);
+    return res.status(500).json({ message: 'Failed to load dashboard insights.' });
+  }
+});
+
 app.get('/api/fleet_schedule_demo/:fleetId', requireAuth, async (req, res) => {
   try {
     const { fleetId } = req.params;
@@ -264,10 +470,6 @@ app.get('/api/fleet_schedule_demo/:fleetId', requireAuth, async (req, res) => {
     console.error('Fleet schedule demo error:', error);
     return res.status(500).json({ message: 'Failed to load schedule demo data.' });
   }
-});
-
-app.get('/api/auth/me', requireAuth, (req, res) => {
-  res.json({ user: req.session.user });
 });
 
 app.post('/api/logout', (req, res) => {
